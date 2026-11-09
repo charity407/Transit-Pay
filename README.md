@@ -541,7 +541,7 @@ TransitPay/
 
 ## 9. Team & Acknowledgements
 
-Built for the **Ripple Agentic Finance Hackathon** — Prize: \$2,500 + Fast-track to UDAX Cape Town Accelerator.
+Built for the **Ripple Agentic Finance Hackathon**
 
 > *"Africa's trade infrastructure is too important to run on 1980s payment rails.  
 > XRPL + RLUSD + AI agents make instant, transparent, auditable freight settlement possible — today."*
