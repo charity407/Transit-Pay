@@ -1,0 +1,26 @@
+# Python environments and generated files
+backend/.env
+backend/.venv/
+backend/venv/
+**/__pycache__/
+*.py[cod]
+backend/.pytest_cache/
+backend/audit_logs.jsonl
+backend/channel_state.json
+
+# Root-level local Python environment and test cache
+/.venv/
+/venv/
+/.pytest_cache/
+
+# Node.js and Next.js generated files
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/*.tsbuildinfo
+
+# Local tooling and editor state
+.tsupgrader/
+.vscode/
+*.log
