@@ -178,18 +178,18 @@ and channel limits in RLUSD.
 
 ## 4. Key Features
 
-### 🔐 Cryptographic Agent Governance
+### 1. Cryptographic Agent Governance
 The AI agent **never has access to the CFO's main treasury wallet**. The CFO pre-funds an XRPL
 Payment Channel with a strict per-channel cap. The agent can only issue `PaymentChannelClaim`
 transactions — and the XRPL network's consensus mechanism enforces the ceiling. Even if the AI
 agent were compromised or malicious, it cannot drain more than the channel cap.
 
-### 📄 Vision-Powered POD Verification
+### 2. Vision-Powered POD Verification
 GPT-4o Vision parses Proof of Delivery receipt images, extracting structured fields (Freight ID,
 Arrival/Departure timestamps, Carrier wallet) with a confidence score. Only PODs with confidence
 ≥ 80% are auto-approved; borderline documents route to human review.
 
-### 🧾 Interactive Scanned Bill of Lading & OCR Inspector
+### 3. Interactive Scanned Bill of Lading & OCR Inspector
 
 The inbound delivery simulator includes a compact scanned-document preview beside the
 freight identifier and a **View Scanned Bill of Lading** inspection action. Its
@@ -215,7 +215,7 @@ Vision processing. The inspector's zoom controls adjust the document from 50% to
 preview and reliable OCR processing. After processing, the scan is available in
 that session's settlement dossier.
 
-### 📚 Verified Settlement History
+### 4. Verified Settlement History
 
 The **Live Agent Telemetry & Settlement History** table lists delivery decisions,
 POD scan actions, route and dwell details, settlement amount, and XRPL testnet
@@ -232,7 +232,7 @@ Uploaded document bytes are associated with the current browser session's dossie
 the JSONL audit record stores the extracted fields and decision, not the original
 image.
 
-### 💰 Top Up the Active Channel
+### 5. Top Up the Active Channel
 
 The CFO dashboard provides **Top-Up Float** actions in the Active Channel Float
 card and active-channel banner. Choose a custom RLUSD-equivalent amount or use the
@@ -243,20 +243,20 @@ float, update the CFO reserve display, and add a confirmed funding event—with 
 transaction hash and explorer link—to the settlement history and
 `backend/audit_logs.jsonl`. Top-ups are shown as funding events, not freight payouts.
 
-### ⏱️ Precise Demurrage Calculation
+### 6. Precise Demurrage Calculation
 ```python
 billable_hours = max(0, dwell_hours - free_hours)        # 4 hrs (6 total - 2 free)
 demurrage_charge = billable_hours * min(rate, rate_cap)  # 4 × $20 = $80
 total_payout = base_freight + demurrage_charge            # $500 + $80 = $580 RLUSD
 ```
 
-### 🛑 One-Click Kill-Switch
+### 7. One-Click Kill-Switch
 The CFO can immediately revoke agent authority by clicking "Activate Kill-Switch" in the
 dashboard. This triggers a `PaymentChannelClose` transaction on-chain, freezing the channel
 within one XRPL ledger close (~3.5 seconds). No centralized off switch — it's enforced by
 the ledger itself.
 
-### 📊 Full Immutable Audit Trail
+### 8. Full Immutable Audit Trail
 Every agent decision — approved or rejected — is logged with:
 - Chain-of-thought LLM reasoning
 - Input POD fields + GPS telemetry
@@ -422,10 +422,10 @@ You can trigger settlements in two ways:
 1. Open **[http://localhost:3000](http://localhost:3000)**.
 2. Locate the **Inbound Delivery Simulator** card above the Telemetry Feed.
 3. Select any African corridor preset:
-   - 🚚 **Standard Freight (Mombasa -> Kampala)** (3.5h dwell = $530.00 RLUSD)
-   - ⏱️ **Border Bottleneck (Malaba Customs)** (6.0h dwell = $580.00 RLUSD)
-   - ⚠️ **Severe Depot Congestion (Kampala)** (11.0h dwell = $680.00 RLUSD)
-   - 🛑 **Over-Cap Breach Attempt** (35.0h dwell = Blocked by Ledger Limit)
+   -  **Standard Freight (Mombasa -> Kampala)** (3.5h dwell = $530.00 RLUSD)
+   -  **Border Bottleneck (Malaba Customs)** (6.0h dwell = $580.00 RLUSD)
+   -  **Severe Depot Congestion (Kampala)** (11.0h dwell = $680.00 RLUSD)
+   -  **Over-Cap Breach Attempt** (35.0h dwell = Blocked by Ledger Limit)
 4. Click **`Process Inbound Delivery`**.
 5. The agent immediately audits the claim, submits a `PaymentChannelClaim` to XRPL Testnet, and slides out the **AI Reasoning Dossier** with the live transaction hash!
 
