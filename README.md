@@ -99,6 +99,13 @@ consistent `Amount` and `Balance` fields in `PaymentChannelClaim`. This avoids
 malformed amount errors such as `temBAD_AMOUNT`; the application still tracks payouts
 and channel limits in RLUSD.
 
+### Our Competitors
+1. Legacy Banks (SWIFT): Take 3–7 days and charge 7–9% in cross-border fees; our edge is 3.5-second RLUSD settlement on XRPL for ~$0.0002.
+2. Freight Platforms (Lori Systems, Amitruck): Match trucks to loads but still depend on manual POD reviews and 30–45 day settlement cycles; our edge is autonomous Vision OCR + GPS geofence auditing that settles demurrage immediately instead of waiting 47 days.
+3. Generic Payment & Stablecoin APIs (M-Pesa B2B, Conduit, Pretium): Transfer funds without verifying cargo milestones or wait-time penalties; our edge is automated demurrage math tied directly to tamper-resistant physical delivery proof.
+
+Why CFOs Choose TransitPay AI: Unlike standard AI payment tools that require blind trust in software permissions, our XRPL Payment Channels enforce hard spending ceilings at the consensus layer (tecINSUFF_PAY_CHANNEL_FUNDS), paired with a step-by-step audit drawer and an on-chain kill-switch.
+
 ### Comparative Advantage
 
 | Feature | SWIFT Wire | M-Pesa B2B | XRPL + RLUSD |
