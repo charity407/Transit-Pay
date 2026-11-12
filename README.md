@@ -25,7 +25,7 @@
 ---
 
 ## 1. The African Market Problem
-
+https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSZMxoIwwwDmAE_ksxnw38VzxccIHjiX2dOGsqWJRNmlg&s
 ### The Northern Corridor Crisis
 
 The **Mombasa–Nairobi–Kampala–Kigali corridor** is the economic spine of East Africa, handling
