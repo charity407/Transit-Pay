@@ -25,11 +25,10 @@
 ---
 
 ## 1. The African Market Problem
-https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSZMxoIwwwDmAE_ksxnw38VzxccIHjiX2dOGsqWJRNmlg&s
 ### The Northern Corridor Crisis
 
 The **Mombasa–Nairobi–Kampala–Kigali corridor** is the economic spine of East Africa, handling
-over **\$6 billion** in annual trade flows. Yet the logistics and treasury operations running
+over **\$6 billion** in annual trade flows according to NCTTA(Northern Corridor Transit and Transport Coordination authority). Yet the logistics and treasury operations running
 this corridor are trapped in a 1980s payment infrastructure:
 
 | Pain Point | Current Reality | Annual Cost |
@@ -78,7 +77,7 @@ RLUSD (Ripple USD) is a 1:1 USD-backed stablecoin, meaning:
 Traditional payment channels require trust. **XRPL Payment Channels enforce trust cryptographically**:
 
 ```
-CFO pre-funds channel with $1,000 RLUSD cap
+CFO pre-funds channel with RLUSD cap eg $1000
                 ↓
 XRPL Ledger locks the funds in escrow
                 ↓  
