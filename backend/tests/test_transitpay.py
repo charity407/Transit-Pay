@@ -12,6 +12,7 @@ Tests:
 import json
 import pytest
 import asyncio
+import base64
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
@@ -27,6 +28,8 @@ from agent_service import (
     calculate_demurrage,
     _mock_pod_parse,
     _mock_authorisation,
+    _validate_pod_image,
+    enforce_policy,
     AGENT_LIMITS,
     ChannelFundingRequest,
     channel_fund,
@@ -35,9 +38,12 @@ from xrpl_treasury import (
     ChannelRecord,
     ClaimRejectedError,
     XRPLTreasuryError,
+    create_payment_channel,
+    reconcile_channel_with_ledger,
     rlusd_to_drops_equivalent,
     _build_rlusd_amount,
 )
+from xrpl.wallet import Wallet
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +118,27 @@ class TestPODParsing:
         result = _mock_pod_parse(wallet)
         assert result["carrier_wallet"] == wallet
 
+    @pytest.mark.asyncio
+    async def test_vision_api_failure_is_unverified_not_mock_approved(self, monkeypatch):
+        import agent_service
+
+        monkeypatch.setattr(agent_service, "OPENAI_API_KEY", "sk-configured")
+        monkeypatch.setattr(
+            agent_service,
+            "openai_client",
+            SimpleNamespace(chat=SimpleNamespace(
+                completions=SimpleNamespace(create=AsyncMock(side_effect=RuntimeError("unavailable")))
+            )),
+        )
+
+        result = await agent_service.parse_pod_with_vision(
+            "cG9k", None, "rCarrier", freight_id="FRT-UNVERIFIED"
+        )
+
+        assert result["delivery_status"] == "UNVERIFIED"
+        assert result["confidence_score"] == 0.0
+        assert result["parse_error"]
+
 
 # ---------------------------------------------------------------------------
 # UNIT TESTS — Agent Pre-flight Safety Checks
@@ -179,6 +206,73 @@ class TestDropsConversion:
         assert drops == "0"
 
 
+class TestXRPLChannelGovernance:
+
+    def test_channel_is_created_by_cfo_with_agent_claim_key(self, monkeypatch):
+        import xrpl_treasury
+
+        cfo_wallet = Wallet.create()
+        agent_wallet = Wallet.create()
+        carrier_wallet = Wallet.create()
+        submitted = {}
+
+        monkeypatch.setattr(xrpl_treasury, "_rpc_client", lambda: object())
+
+        def fake_submit(tx, _client, signer):
+            submitted["tx"] = tx
+            submitted["signer"] = signer
+            return SimpleNamespace(result={
+                "meta": {
+                    "TransactionResult": "tesSUCCESS",
+                    "AffectedNodes": [{
+                        "CreatedNode": {
+                            "LedgerEntryType": "PayChannel",
+                            "LedgerIndex": "C" * 64,
+                        }
+                    }],
+                },
+                "hash": "D" * 64,
+            })
+
+        monkeypatch.setattr(xrpl_treasury, "submit_and_wait", fake_submit)
+        create_payment_channel(
+            cfo_wallet=cfo_wallet,
+            carrier_address=carrier_wallet.address,
+            channel_public_key=agent_wallet.public_key,
+        )
+
+        assert submitted["tx"].account == cfo_wallet.address
+        assert submitted["tx"].public_key == agent_wallet.public_key
+        assert submitted["signer"] == cfo_wallet
+
+    def test_reconciliation_converts_ledger_drops_to_rlusd_proxy(self, monkeypatch):
+        import xrpl_treasury
+
+        record = ChannelRecord(
+            channel_id="A" * 64,
+            cfo_address="rCFO",
+            carrier_address="rCarrier",
+            max_rlusd=Decimal("1000"),
+        )
+        monkeypatch.setattr(
+            xrpl_treasury,
+            "get_channel_info",
+            lambda *_: {"amount": "50000000", "balance": "10000000"},
+        )
+        monkeypatch.setattr(xrpl_treasury, "_persist_channel_record", lambda _record: None)
+
+        result = reconcile_channel_with_ledger(record)
+
+        assert result["amount"] == "50000000"
+        assert record.max_rlusd == Decimal("1000")
+        assert record.claimed_rlusd == Decimal("200")
+        assert record.remaining_rlusd == Decimal("800")
+        assert record.is_open is True
+        record.is_open = False
+        reconcile_channel_with_ledger(record)
+        assert record.is_open is False
+
+
 # ---------------------------------------------------------------------------
 # UNIT TESTS — LLM Authorisation Mock
 # ---------------------------------------------------------------------------
@@ -220,6 +314,173 @@ class TestMockAuthorisation:
         result  = _mock_authorisation(calc, channel)
         assert result["approved"] is False
         assert "EXCEEDS_CHANNEL_CAP" in result["flags"]
+
+
+class TestDeterministicPolicy:
+
+    def test_policy_requires_completed_confident_delivery_within_limits(self, monkeypatch):
+        import agent_service
+
+        monkeypatch.setattr(agent_service, "daily_spend_tracker", {})
+        pod = {"delivery_status": "COMPLETED", "confidence_score": 0.95}
+        calc = {"total_payout_rlusd": "580.00"}
+        channel = {"remaining_rlusd": "700.00"}
+        limits = {
+            "max_single_trip_rlusd": "1000.00",
+            "max_daily_budget_rlusd": "5000.00",
+        }
+
+        assert enforce_policy(pod, calc, channel, limits)[0] is True
+        assert enforce_policy({**pod, "delivery_status": "PARTIAL"}, calc, channel, limits)[0] is False
+        assert enforce_policy({**pod, "confidence_score": 0.79}, calc, channel, limits)[0] is False
+        assert enforce_policy(pod, {"total_payout_rlusd": "0"}, channel, limits)[0] is False
+        assert enforce_policy(pod, calc, {"remaining_rlusd": "500"}, limits)[0] is False
+        assert enforce_policy(
+            pod, calc, channel, {**limits, "max_single_trip_rlusd": "500"}
+        )[0] is False
+        assert enforce_policy(
+            pod, calc, channel, {**limits, "max_daily_budget_rlusd": "500"}
+        )[0] is False
+
+    @pytest.mark.asyncio
+    async def test_daily_budget_reservation_prevents_concurrent_overage(self, monkeypatch):
+        import agent_service
+
+        date_key = agent_service._today_key()
+        monkeypatch.setattr(agent_service, "daily_spend_tracker", {date_key: Decimal("900")})
+        monkeypatch.setattr(agent_service, "settled_freight_ids", set())
+        monkeypatch.setattr(agent_service, "processing_freight_ids", set())
+        monkeypatch.setitem(agent_service.AGENT_LIMITS, "max_daily_rlusd", Decimal("1000"))
+        monkeypatch.setattr(agent_service, "claim_payment", lambda **_kwargs: {"tx_hash": "A" * 64})
+        channel = ChannelRecord(
+            channel_id="A" * 64,
+            cfo_address="rCFO",
+            carrier_address="rCarrier",
+            max_rlusd=Decimal("1000"),
+        )
+
+        outcomes = await asyncio.gather(
+            agent_service._claim_payment_once("FRT-1", channel, Decimal("100"), object(), object()),
+            agent_service._claim_payment_once("FRT-2", channel, Decimal("100"), object(), object()),
+            return_exceptions=True,
+        )
+
+        assert sum(isinstance(outcome, dict) for outcome in outcomes) == 1
+        assert sum(isinstance(outcome, ClaimRejectedError) for outcome in outcomes) == 1
+        assert agent_service.daily_spend_tracker[date_key] == Decimal("1000")
+
+
+class TestPODImageValidation:
+
+    def test_validates_mime_and_decoded_size(self):
+        import agent_service
+
+        encoded = base64.b64encode(b"valid image bytes").decode()
+        assert _validate_pod_image(encoded, "image/png") == (encoded, "image/png")
+
+        oversized = base64.b64encode(
+            b"x" * (agent_service.MAX_POD_IMAGE_BYTES + 1)
+        ).decode()
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            _validate_pod_image(oversized, "image/png")
+        assert exc.value.status_code == 413
+
+        with pytest.raises(HTTPException) as exc:
+            _validate_pod_image(encoded, "application/pdf")
+        assert exc.value.status_code == 415
+
+
+class TestControlPlaneAuth:
+
+    def test_kill_switch_without_api_key_returns_401(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        import agent_service
+
+        monkeypatch.setattr(agent_service, "CHANNEL_STATE_FILE", tmp_path / "missing.json")
+        monkeypatch.setattr(agent_service, "AUDIT_LOG_FILE", tmp_path / "audit.jsonl")
+        response = TestClient(agent_service.app).post("/api/v1/kill-switch")
+        assert response.status_code == 401
+
+    def test_process_delivery_requires_telemetry_payload(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        import agent_service
+
+        monkeypatch.setattr(agent_service, "CHANNEL_STATE_FILE", tmp_path / "missing.json")
+        monkeypatch.setattr(agent_service, "AUDIT_LOG_FILE", tmp_path / "audit.jsonl")
+        response = TestClient(agent_service.app).post(
+            "/api/v1/process-delivery",
+            headers={"X-API-Key": agent_service.CFO_API_KEY},
+        )
+        assert response.status_code == 422
+
+    def test_duplicate_settlement_returns_409(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        import agent_service
+
+        monkeypatch.setattr(agent_service, "CHANNEL_STATE_FILE", tmp_path / "missing.json")
+        monkeypatch.setattr(agent_service, "AUDIT_LOG_FILE", tmp_path / "audit.jsonl")
+        monkeypatch.setattr(agent_service, "settled_freight_ids", {"FRT-TEST-DUPLICATE"})
+        response = TestClient(agent_service.app).post(
+            "/api/v1/process-delivery",
+            headers={"X-API-Key": agent_service.CFO_API_KEY},
+            json={
+                "freight_id": "FRT-TEST-DUPLICATE",
+                "truck_plate": "KAA-123K",
+                "geofence_name": "Kampala Central Warehouse",
+                "entry_timestamp": "2024-07-15T08:30:00Z",
+                "exit_timestamp": "2024-07-15T14:30:00Z",
+                "total_dwell_minutes": 360,
+                "geofence_lat": 0.3476,
+                "geofence_lon": 32.5825,
+                "carrier_wallet": "rCarrier",
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Duplicate freight_id: already settled on-chain"
+
+
+class TestStartupStateRebuild:
+
+    @pytest.mark.asyncio
+    async def test_startup_restores_settled_ids_and_daily_spend(self, tmp_path, monkeypatch):
+        import agent_service
+
+        log_file = tmp_path / "audit_logs.jsonl"
+        log_file.write_text(json.dumps({
+            "log_id": "test-settlement",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+            "freight_id": "FRT-SETTLED",
+            "decision": "APPROVED",
+            "total_payout_rlusd": "580.00",
+        }) + "\n")
+        monkeypatch.setattr(agent_service, "AUDIT_LOG_FILE", log_file)
+        monkeypatch.setattr(agent_service, "CHANNEL_STATE_FILE", tmp_path / "missing.json")
+        monkeypatch.setattr(agent_service, "audit_logs", [])
+        monkeypatch.setattr(agent_service, "settled_freight_ids", set())
+        monkeypatch.setattr(agent_service, "daily_spend_tracker", {})
+
+        await agent_service.load_audit_logs()
+
+        assert "FRT-SETTLED" in agent_service.settled_freight_ids
+        assert agent_service.daily_spend_tracker["2026-01-02"] == Decimal("580.00")
+
+    def test_existing_channel_uses_registered_cfo_claim_key(self, tmp_path, monkeypatch):
+        import agent_service
+
+        cfo_wallet = Wallet.create()
+        agent_wallet = Wallet.create()
+        carrier_wallet = Wallet.create()
+        channel_file = tmp_path / "channel_state.json"
+        channel_file.write_text(json.dumps({"channel_public_key": cfo_wallet.public_key}))
+        monkeypatch.setattr(agent_service, "CHANNEL_STATE_FILE", channel_file)
+        monkeypatch.setattr(agent_service, "CFO_WALLET_SEED", cfo_wallet.seed)
+        monkeypatch.setattr(agent_service, "AGENT_WALLET_SEED", agent_wallet.seed)
+        monkeypatch.setattr(agent_service, "CARRIER_WALLET_SEED", carrier_wallet.seed)
+
+        claim_wallet, _ = agent_service._load_wallets()
+
+        assert claim_wallet.public_key == cfo_wallet.public_key
 
 
 # ---------------------------------------------------------------------------

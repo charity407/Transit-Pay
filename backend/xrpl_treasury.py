@@ -156,12 +156,12 @@ def provision_wallets(use_env: bool = True) -> tuple[Wallet, Wallet]:
     # Generate fresh wallets via Testnet faucet
     logger.info("Generating CFO wallet via XRPL Testnet faucet …")
     client = _rpc_client()
-    cfo_wallet = generate_faucet_wallet(client, debug=True)
-    logger.info("CFO Wallet:      %s  (seed: %s)", cfo_wallet.address, cfo_wallet.seed)
+    cfo_wallet = generate_faucet_wallet(client, debug=False)
+    logger.info("CFO Wallet:      %s", cfo_wallet.address)
 
     logger.info("Generating Carrier wallet via XRPL Testnet faucet …")
-    carrier_wallet = generate_faucet_wallet(client, debug=True)
-    logger.info("Carrier Wallet:  %s  (seed: %s)", carrier_wallet.address, carrier_wallet.seed)
+    carrier_wallet = generate_faucet_wallet(client, debug=False)
+    logger.info("Carrier Wallet:  %s", carrier_wallet.address)
 
     # Persist seeds for reuse
     _save_env_seeds(cfo_wallet.seed, carrier_wallet.seed)
@@ -211,6 +211,7 @@ def create_payment_channel(
     max_rlusd:         Decimal = DEFAULT_CHANNEL_MAX_RLUSD,
     settle_delay:      int     = DEFAULT_SETTLE_DELAY_SECONDS,
     expiry_seconds:    int     = DEFAULT_CHANNEL_EXPIRY_SECONDS,
+    channel_public_key: Optional[str] = None,
 ) -> ChannelRecord:
     """
     Open an XRPL Payment Channel from the CFO to the Carrier.
@@ -241,7 +242,7 @@ def create_payment_channel(
         amount=xrp_drops_cap,           # XRP drops cap (ledger enforced)
         destination=carrier_address,
         settle_delay=settle_delay,
-        public_key=cfo_wallet.public_key,
+        public_key=channel_public_key or cfo_wallet.public_key,
         cancel_after=cancel_after_ripple_epoch,
     )
 
@@ -302,6 +303,33 @@ def get_channel_info(cfo_address: str, channel_id: str) -> Optional[dict]:
     return execute_in_thread(_do)
 
 
+def _persist_channel_record(record: ChannelRecord):
+    state_path = os.path.join(os.path.dirname(__file__), "channel_state.json")
+    if not os.path.exists(state_path):
+        return
+    with open(state_path) as fh:
+        state = json.load(fh)
+    for key, value in state.items():
+        if key.endswith("_wallet") and isinstance(value, dict):
+            value.pop("seed", None)
+    state["channel"] = record.to_dict()
+    with open(state_path, "w") as fh:
+        json.dump(state, fh, indent=2, default=str)
+
+
+def reconcile_channel_with_ledger(channel_record: ChannelRecord) -> Optional[dict]:
+    """Synchronize local proxy capacity and cumulative claims with the XRPL channel."""
+    live_channel = get_channel_info(channel_record.cfo_address, channel_record.channel_id)
+    if live_channel is None:
+        channel_record.is_open = False
+    else:
+        drops_per_rlusd = Decimal("1000000") * Decimal("0.05")
+        channel_record.max_rlusd = Decimal(str(live_channel.get("amount", "0"))) / drops_per_rlusd
+        channel_record.claimed_rlusd = Decimal(str(live_channel.get("balance", "0"))) / drops_per_rlusd
+    _persist_channel_record(channel_record)
+    return live_channel
+
+
 def get_account_balance(address: str) -> dict:
     """Return XRP and issued-currency balances for an address."""
     def _do():
@@ -327,7 +355,8 @@ def sign_channel_claim(
 ) -> str:
     """
     Produce a channel claim authorization signature.
-    The CFO (or the agent wallet) signs the channel_id + amount combo.
+    The key registered as PaymentChannelCreate.PublicKey signs the channel_id
+    and cumulative amount authorization.
     """
     # XRPL channel claim signature: sign SHA512-Half of the claim prefix + channel + amount
     # Reference: https://xrpl.org/docs/references/protocol/transactions/types/paymentchannelclaim
@@ -346,7 +375,10 @@ def claim_payment(
     carrier_wallet:  Wallet,
 ) -> dict:
     """
-    Agent submits a PaymentChannelClaim for `rlusd_amount` RLUSD.
+    Agent authorizes a PaymentChannelClaim for `rlusd_amount` RLUSD. XRPL
+    requires the channel destination (the carrier) to submit the transaction;
+    the carrier signs its transaction envelope while the registered agent key
+    signs the channel claim authorization.
 
     Safety Layer (pre-flight):
       1. Verify rlusd_amount ≤ channel_record.remaining_rlusd
@@ -360,8 +392,8 @@ def claim_payment(
     Args:
         channel_record:  Local ChannelRecord (holds cap + claimed so far)
         rlusd_amount:    Amount to claim in RLUSD
-        agent_wallet:    Agent's signing wallet (not the CFO treasury)
-        carrier_wallet:  Carrier wallet that receives the funds
+        agent_wallet:    Wallet matching the PublicKey registered on the channel
+        carrier_wallet:  Destination wallet that submits the transaction
 
     Returns:
         dict with tx_hash, claimed_rlusd, audit details
@@ -429,6 +461,10 @@ def claim_payment(
 
     explorer_url = f"https://testnet.xrpl.org/transactions/{tx_hash}"
     logger.info("Claim SUCCESS: %s RLUSD | TX: %s", rlusd_amount, explorer_url)
+    try:
+        reconcile_channel_with_ledger(channel_record)
+    except Exception as exc:
+        logger.warning("Claim confirmed, but channel reconciliation failed: %s", exc)
 
     return {
         "status":          "SUCCESS",
@@ -486,6 +522,10 @@ def fund_payment_channel(
 
     channel_record.max_rlusd += top_up_rlusd
     channel_record.last_tx_hash = tx_hash
+    try:
+        reconcile_channel_with_ledger(channel_record)
+    except Exception as exc:
+        logger.warning("Channel funding confirmed, but reconciliation failed: %s", exc)
     logger.info("Channel cap raised to %s RLUSD | TX: %s", channel_record.max_rlusd, tx_hash)
     return {
         "status":        "FUNDED",
@@ -518,7 +558,16 @@ def emergency_close_channel(
     result   = response.result
     tx_hash  = result.get("hash", "N/A")
 
+    tx_result_code = result.get("meta", {}).get("TransactionResult", "UNKNOWN")
+    if tx_result_code != "tesSUCCESS":
+        raise XRPLTreasuryError(f"PaymentChannelClose failed: {tx_result_code}")
+
     channel_record.is_open = False
+    channel_record.last_tx_hash = tx_hash
+    try:
+        reconcile_channel_with_ledger(channel_record)
+    except Exception as exc:
+        logger.warning("Channel close confirmed, but reconciliation failed: %s", exc)
     logger.warning("Channel closed | TX: https://testnet.xrpl.org/transactions/%s", tx_hash)
 
     return {
@@ -550,25 +599,44 @@ def bootstrap_testnet_environment() -> dict:
       2. Set RLUSD trustlines on both wallets
       3. Create a payment channel (CFO → Carrier, $1,000 cap)
       4. Return full environment state dict
+
+    Security note: private wallet seeds are NEVER written to channel_state.json.
+    Only public addresses, the channel_id, and public keys are persisted.
     """
     logger.info("=== TransitPay AI — XRPL Testnet Bootstrap ===")
 
     cfo_wallet, carrier_wallet = provision_wallets(use_env=True)
 
+    # Register the agent key for claim authorization, falling back to CFO for
+    # environments without a dedicated agent wallet.
+    agent_seed = os.getenv("AGENT_WALLET_SEED", "")
+    if agent_seed:
+        agent_wallet = Wallet.from_seed(agent_seed)
+        channel_public_key = agent_wallet.public_key
+        logger.info("Agent wallet loaded for channel public key: %s", agent_wallet.address)
+    else:
+        agent_wallet = cfo_wallet
+        channel_public_key = agent_wallet.public_key
+        logger.info("No AGENT_WALLET_SEED — using CFO public key for channel registration.")
+
     # Set RLUSD trustlines
     cfo_trust     = establish_rlusd_trustline(cfo_wallet,     limit="50000")
     carrier_trust = establish_rlusd_trustline(carrier_wallet, limit="50000")
 
-    # Open payment channel
+    # Open payment channel (Account = CFO; PublicKey = agent_wallet or CFO)
     channel = create_payment_channel(
         cfo_wallet=cfo_wallet,
         carrier_address=carrier_wallet.address,
         max_rlusd=Decimal("1000"),
+        channel_public_key=channel_public_key,
     )
 
+    # NOTE: Seeds are intentionally excluded from env_state to prevent leakage.
     env_state = {
-        "cfo_wallet":          {"address": cfo_wallet.address, "seed": cfo_wallet.seed},
-        "carrier_wallet":      {"address": carrier_wallet.address, "seed": carrier_wallet.seed},
+        "cfo_wallet":          {"address": cfo_wallet.address, "public_key": cfo_wallet.public_key},
+        "agent_wallet":        {"address": agent_wallet.address, "public_key": agent_wallet.public_key},
+        "carrier_wallet":      {"address": carrier_wallet.address, "public_key": carrier_wallet.public_key},
+        "channel_public_key":  channel_public_key,
         "cfo_trustline_tx":    cfo_trust["trustline_hash"],
         "carrier_trustline_tx":carrier_trust["trustline_hash"],
         "channel":             channel.to_dict(),
@@ -576,7 +644,7 @@ def bootstrap_testnet_environment() -> dict:
         "network":             XRPL_TESTNET_RPC,
     }
 
-    # Persist channel state to JSON for the agent service
+    # Persist channel state to JSON for the agent service (no seeds written here)
     state_path = os.path.join(os.path.dirname(__file__), "channel_state.json")
     with open(state_path, "w") as fh:
         json.dump(env_state, fh, indent=2, default=str)

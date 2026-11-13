@@ -1,6 +1,6 @@
 # TransitPay AI
 ## Autonomous Freight & Demurrage Settlement Agent
-### Ripple Agentic Finance Hackathon — $2,500 Prize Track
+### Ripple Agentic Finance Hackathon
 
 <div align="center">
 
@@ -13,12 +13,13 @@
                                             /____/                 
 ```
 
-**Instant RLUSD freight settlement on XRPL · Northern Corridor · Africa**
+**Freight settlement workflows on XRPL Testnet · Northern Corridor · Africa**
 
 [![XRPL](https://img.shields.io/badge/XRPL-Testnet-blue?logo=xrp)](https://testnet.xrpl.org)
 [![RLUSD](https://img.shields.io/badge/Stablecoin-RLUSD-green)](https://docs.ripple.com/products/stablecoin)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/Frontend-Next.js%2014-black?logo=next.js)](https://nextjs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 </div>
 
@@ -27,67 +28,65 @@
 ## 1. The African Market Problem
 ### The Northern Corridor Crisis
 
-The **Mombasa–Nairobi–Kampala–Kigali corridor** is the economic spine of East Africa, handling
-over **\$6 billion** in annual trade flows according to NCTTA(Northern Corridor Transit and Transport Coordination authority). Yet the logistics and treasury operations running
-this corridor are trapped in a 1980s payment infrastructure:
+The **Mombasa–Nairobi–Kampala–Kigali corridor** connects the Port of Mombasa with
+the Great Lakes region. The [Northern Corridor
+Transit and Transport Coordination Authority (NCTTCA)](https://www.ttcanc.org/)
+describes the corridor as serving six member states and a regional population of
+more than 250 million ([NCTTCA, official website](https://www.ttcanc.org/)).
+This is a corridor-scale population figure, not a measure of annual trade value.
 
-| Pain Point | Current Reality | Annual Cost |
-|---|---|---|
-| Cross-border bank wire delays | 3–7 business days per transfer | \$180M in liquidity cost |
-| Correspondent banking fees | 7–9% of transfer value | \$540M drained annually |
-| Demurrage invoice disputes | 45–60 day resolution cycle | \$120M in unpaid penalties |
-| Freight payment cycles | 30–45 day net terms standard | \$2.1B in working capital locked |
-| Manual POD verification | 3–5 days of paper processing | \$80M in administrative overhead |
+The project addresses operational challenges that can arise in freight payments:
+manual proof-of-delivery review, demurrage disputes, cross-border payment delays,
+and working capital tied up while invoices are reconciled. The earlier market
+loss and fee estimates have been removed because they did not have verifiable,
+figure-specific sources. This README does not present them as measured industry
+statistics.
 
-**The core problem:** An FMCG manufacturer like Unilever Kenya ships goods to Kampala via a
-freight carrier. The truck arrives at the Kampala warehouse, is delayed 6 hours due to
-offloading queues (demurrage), and delivers the goods. The carrier must then:
+**Illustrative workflow:** An FMCG manufacturer ships goods to Kampala via a
+freight carrier. The truck arrives at a warehouse, is delayed during offloading
+(demurrage), and delivers the goods. The carrier may then:
 
 1. File a paper invoice with the demurrage claim
-2. Wait for the shipper's finance team to audit it (2–3 weeks)
-3. Raise a dispute if amounts differ (another 2–4 weeks)
-4. Receive payment via SWIFT wire with 7–9% correspondent banking fees
+2. Wait for the shipper's finance team to audit it
+3. Raise a dispute if amounts differ
+4. Receive payment through the shipper's chosen payment channel
 
-**Result:** Small and medium freight carriers in East Africa operate with negative working capital,
-taking high-interest mobile loans (at 18–24% APR) just to pay drivers while waiting for freight
-settlements. This kills growth for the carriers who move Africa's goods.
-
-### The Demurrage Problem in Numbers
-
-> *"A truck sitting at a warehouse is a truck not moving cargo."*
-
-- Average demurrage dispute resolution: **47 days**
-- Percentage of demurrage invoices disputed: **34%** (Kenya Revenue Authority, 2023)
-- Average under-payment on settled demurrage claims: **23%**
-- Carrier default rate due to cash flow stress: **12% annually** (Lori Systems, 2023)
+**Potential impact:** Delayed freight settlement can put pressure on carrier cash
+flow and complicate reconciliation. The corridor-specific effects and magnitudes
+vary by operator; no single regional rate or average is asserted here.
 
 ---
 
 ## 2. Why RLUSD + XRPL Solves This
 
-### Stable Settlement Without Volatility Risk
+### Stablecoin Settlement Design
 
-RLUSD (Ripple USD) is a 1:1 USD-backed stablecoin, meaning:
-- Carriers receive **exactly what they're owed** — no exchange rate risk between invoice and payment
-- CFO treasuries can budget precisely — no "crypto volatility" objection from finance committees
-- RLUSD is accepted as a stable USD proxy for SAP and Oracle ERP reconciliation
+Ripple describes RLUSD (Ripple USD) as a USD-backed stablecoin designed to be
+redeemable 1:1 for US dollars ([Ripple RLUSD documentation](https://docs.ripple.com/products/stablecoin)).
+This description is the issuer's statement; actual redemption and availability
+depend on the applicable terms and service.
 
-### XRPL Payment Channels: The Technical Breakthrough
+RLUSD denomination is intended to make invoice amounts easier to reconcile
+against USD-denominated freight charges. The Testnet demo locks native XRP and
+tracks an RLUSD-denominated proxy; it does not eliminate XRP price risk or
+guarantee a USD value.
 
-Traditional payment channels require trust. **XRPL Payment Channels enforce trust cryptographically**:
+### XRPL Payment Channels: The Technical Approach
+
+*XRPL Payment Channels lock native XRP liquidity mapped 1:1 as an RLUSD-denominated settlement proxy on Testnet. Native RLUSD IOU vault settlement using XLS-65 is a future direction, subject to Mainnet amendment availability and implementation.* This demo does not lock or transfer native RLUSD IOUs in its payment channel.
 
 ```
-CFO pre-funds channel with RLUSD cap eg $1000
+CFO pre-funds an XRP channel with the XRP equivalent of a $1,000 RLUSD-denominated cap
                 ↓
-XRPL Ledger locks the funds in escrow
+XRPL Ledger locks native XRP; TransitPay tracks the mapped RLUSD proxy balance
                 ↓  
-Agent can ONLY claim ≤ $1,000 (enforced by consensus nodes, not by the agent)
+Agent can ONLY claim within the mapped channel capacity (enforced by consensus nodes)
                 ↓
-If agent attempts to claim $1,001 → XRPL node returns tecINSUFF_PAY_CHANNEL_FUNDS
+If agent attempts to claim beyond capacity → XRPL rejects the claim
 ```
 
-This is not a software permission check — it is a **mathematical guarantee enforced by 150+
-independent XRPL validator nodes worldwide**. No CFO approval required per transaction.
+This is not a software permission check — the underlying XRP channel ceiling is enforced by
+XRPL consensus. No CFO approval is required per transaction.
 
 #### PaymentChannelClaim amount handling
 
@@ -98,10 +97,22 @@ consistent `Amount` and `Balance` fields in `PaymentChannelClaim`. This avoids
 malformed amount errors such as `temBAD_AMOUNT`; the application still tracks payouts
 and channel limits in RLUSD.
 
+The configured agent key signs the channel-claim authorization. The XRPL channel
+destination (the carrier) must submit and sign the outer `PaymentChannelClaim`
+transaction, as required by the ledger; the CFO account remains the channel funder
+and closer.
+
 ### Our Competitors
-1. Legacy Banks (SWIFT): Take 3–7 days and charge 7–9% in cross-border fees; our edge is 3.5-second RLUSD settlement on XRPL for ~$0.0002.
-2. Freight Platforms (Lori Systems, Amitruck): Match trucks to loads but still depend on manual POD reviews and 30–45 day settlement cycles; our edge is autonomous Vision OCR + GPS geofence auditing that settles demurrage immediately instead of waiting 47 days.
-3. Generic Payment & Stablecoin APIs (M-Pesa B2B, Conduit, Pretium): Transfer funds without verifying cargo milestones or wait-time penalties; our edge is automated demurrage math tied directly to tamper-resistant physical delivery proof.
+1. Bank and correspondent payment services: provide cross-border transfers; TransitPay's focus is tying a freight payout decision to delivery evidence and configured demurrage rules.
+2. Freight platforms: support freight matching and fleet workflows; TransitPay's focus is integrating delivery verification with a settlement workflow.
+3. Generic payment and stablecoin APIs: provide payment infrastructure; TransitPay's focus is adding freight-specific proof-of-delivery and demurrage checks.
+
+These are high-level product categories, not a verified feature-by-feature
+assessment of individual providers. Pricing, transfer times, and service
+capabilities vary by provider, route, and account.
+
+The demo's corridor presets, amounts, confidence labels, and timing examples are
+configured or synthetic examples, not measured industry results.
 
 Why CFOs Choose TransitPay AI: Unlike standard AI payment tools that require blind trust in software permissions, our XRPL Payment Channels enforce hard spending ceilings at the consensus layer (tecINSUFF_PAY_CHANNEL_FUNDS), paired with a step-by-step audit drawer and an on-chain kill-switch.
 
@@ -109,12 +120,12 @@ Why CFOs Choose TransitPay AI: Unlike standard AI payment tools that require bli
 
 | Feature | SWIFT Wire | M-Pesa B2B | XRPL + RLUSD |
 |---|---|---|---|
-| Settlement time | 3–7 days | Instant (KES only) | **3–5 seconds** |
-| Cross-border support | Yes (expensive) | Limited | **Yes (global)** |
-| Currency stability | Yes | Yes (local) | **Yes (USD-pegged)** |
+| Settlement time | Varies by provider and route | Varies by service | Depends on XRPL ledger/network conditions |
+| Cross-border support | Depends on bank and corridor | Depends on service and market | XRPL network access; local requirements still apply |
+| Currency stability | Depends on currency and instrument | KES-denominated services | XRP-backed RLUSD-denominated proxy in this Testnet demo |
 | Programmable limits | No | No | **Yes (PayChannel)** |
 | Autonomous agent-safe | No | No | **Yes (cryptographic)** |
-| Fee (per transaction) | 7–9% | 1–3% | **\~\$0.0002** |
+| Fee (per transaction) | Varies | Varies | Depends on XRPL transaction and network conditions |
 | Audit trail | Bank records | M-Pesa logs | **Immutable ledger** |
 
 ---
@@ -163,9 +174,9 @@ Why CFOs Choose TransitPay AI: Unlike standard AI payment tools that require bli
 │   ┌─────────────────────────────────────────────────────────┐            │
 │   │   XRPL Testnet (wss://s.altnet.rippletest.net:51233)     │            │
 │   │                                                           │            │
-│   │  - 150+ validator nodes enforce payment channel ceiling   │            │
+│   │  - XRPL consensus enforces payment-channel constraints    │            │
 │   │  - tecINSUFF_PAY_CHANNEL_FUNDS rejects over-claims       │            │
-│   │  - Settlement in ~3.5 seconds                             │            │
+│   │  - Confirmation time varies with ledger and network state  │            │
 │   │  - Explorer: testnet.xrpl.org                             │            │
 │   └─────────────────────────────────────────────────────────┘            │
 │                              ▲                                            │
@@ -173,8 +184,10 @@ Why CFOs Choose TransitPay AI: Unlike standard AI payment tools that require bli
 │   │     CFO Control Dashboard (Next.js 14 + Tailwind)        │            │
 │   │                                                           │            │
 │   │  - Live treasury & channel balance                        │            │
-│   │  - Limit configuration sliders                            │            │
-│   │  - Agent telemetry feed (real-time audit log)             │            │
+│   │  - CFO Treasury Guardrails + Freight Rate Matrix sliders  │            │
+│   │  - Inbound Delivery Simulator with Scanned POD thumbnail  │            │
+│   │  - Searchable Settlement History + Testnet TX links       │            │
+│   │  - OCR Inspector modal with GPS cross-audit panel         │            │
 │   │  - Emergency kill-switch (PaymentChannelClose tx)         │            │
 │   └─────────────────────────────────────────────────────────┘            │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -214,12 +227,12 @@ values; actual POD extraction and compliance decisions are handled by the agent'
 Vision/OCR flow.
 
 Use **Upload Scanned POD** to select a document for the simulator, or drag an image
-or PDF onto the open inspection modal. The selected file is read in the browser,
-displayed in the inspector, and sent as base64 data with the delivery request for
-Vision processing. The inspector's zoom controls adjust the document from 50% to
-200%, with a reset to 100%. Image files are the supported format for in-modal
-preview and reliable OCR processing. After processing, the scan is available in
-that session's settlement dossier.
+or PDF onto the open inspection modal. The selected file is read in the browser
+and displayed in the inspector. OCR submission accepts PNG, JPEG, or WebP images
+up to 5 MB; PDFs can be inspected in the UI but are not accepted by the current
+OCR request API. The inspector's zoom controls adjust the document from 50% to
+200%, with a reset to 100%. After processing, the scan is available in that
+session's settlement dossier.
 
 ### 4. Verified Settlement History
 
@@ -257,10 +270,10 @@ total_payout = base_freight + demurrage_charge            # $500 + $80 = $580 RL
 ```
 
 ### 7. One-Click Kill-Switch
-The CFO can immediately revoke agent authority by clicking "Activate Kill-Switch" in the
-dashboard. This triggers a `PaymentChannelClose` transaction on-chain, freezing the channel
-within one XRPL ledger close (~3.5 seconds). No centralized off switch — it's enforced by
-the ledger itself.
+The CFO can revoke the active channel by clicking "Activate Kill-Switch" in the
+dashboard. This submits a channel-close request on-ledger; closure and return of
+remaining funds follow XRPL Payment Channel rules and timing. Restarting the agent
+does not reopen a closed channel.
 
 ### 8. Full Immutable Audit Trail
 Every agent decision — approved or rejected — is logged with:
@@ -273,12 +286,16 @@ Every agent decision — approved or rejected — is logged with:
 
 ## 5. Phased Go-To-Market Strategy
 
+The milestones, customer counts, pricing, and settlement volumes in this section
+are TransitPay planning assumptions and targets—not external market statistics,
+current performance, or customer commitments.
+
 ### Phase 1: Shadow Mode (Months 1–3)
 **Target:** 3 FMCG manufacturers on the Northern Corridor (pilot: Unilever Kenya, Bidco Africa)
 
 - Agent audits PODs and calculates demurrage, **recommends payouts** only
 - CFO clicks manual "Execute" button in dashboard
-- KPI: Reduce demurrage dispute resolution from 47 days → 3 days
+- KPI: Measure dispute resolution against a pilot baseline; proposed target is 3 days
 - Revenue model: \$50/month SaaS per logistics corridor managed
 
 ### Phase 2: Restricted Autonomy (Months 4–9)
@@ -351,10 +368,15 @@ Every agent decision — approved or rejected — is logged with:
 
    # Service Port
    PORT=8001
+
+   # API keys and allowed browser origin (replace the development keys outside local demos)
+   CFO_API_KEY=tp_cfo_dev_key_2026
+   AGENT_API_KEY=tp_agent_dev_key_2026
+   FRONTEND_ORIGIN=http://localhost:3000
    ```
 
 4. **Bootstrap the XRPL Testnet Channel:**
-   `channel_state.json` is generated locally and is intentionally not committed because it contains wallet seeds. After setting wallet seeds in `.env`, initialize the trustlines and payment channel:
+   `channel_state.json` is generated locally and contains public wallet/channel metadata only. Wallet seeds stay in the local `.env` file. After setting wallet seeds in `.env`, initialize the trustlines and payment channel:
    ```bash
    python xrpl_treasury.py
    ```
@@ -367,8 +389,42 @@ Every agent decision — approved or rejected — is logged with:
    - **Service Health Check:** `http://localhost:8001/health`
    - **Interactive Swagger Docs:** `http://localhost:8001/docs`
 
----
+#### Restarting the Agent After the CFO Kill-Switch
 
+The kill-switch closes the current XRPL Payment Channel on-ledger. Restarting
+FastAPI alone does **not** reopen that channel, and a closed channel cannot be
+funded again. The CFO must create a replacement channel; the previous channel's
+remaining XRP stays subject to its XRPL settlement delay before it can be returned.
+
+1. Stop the backend with **Ctrl+C**.
+2. Check that `backend/.env` still contains the CFO, carrier, and agent wallet
+   seeds for the intended wallets. The agent seed must match the key that the
+   replacement channel will register. Never put seeds in chat, logs, or
+   `channel_state.json`.
+3. Confirm the CFO wallet has enough Testnet XRP to fund a new channel and pay
+   transaction fees. The default bootstrap opens a new channel with a
+   $1,000 RLUSD-denominated XRP proxy cap; funds still locked in the closed
+   channel are not immediately available for this.
+4. From the `backend` directory, run the bootstrap **once**:
+   ```bash
+   python xrpl_treasury.py
+   ```
+   This creates a new on-ledger channel and replaces the local
+   `channel_state.json` with its public channel/wallet metadata. Do not rerun
+   bootstrap just to restart the process: every successful run creates and funds
+   another channel.
+5. Start the backend again:
+   ```bash
+   python -m uvicorn agent_service:app --host 127.0.0.1 --port 8001 --reload
+   ```
+   Startup reconciles the replacement channel with XRPL.
+6. Check `http://localhost:8001/health`, then
+   `http://localhost:8001/api/v1/channel-status`. Confirm `channel.is_open` is
+   `true` and verify the new `channel_id` before processing deliveries. Refresh
+   the dashboard if it is already open.
+
+---
+~
 ### Step 2: Frontend Installation & Launch
 
 1. **Navigate to the frontend directory:**
@@ -381,10 +437,13 @@ Every agent decision — approved or rejected — is logged with:
    npm install
    ```
 
-3. **Verify `.env.local` points to backend port 8001:**
+3. **Configure `.env.local` for backend port 8001 and the local CFO API key:**
    ```ini
    NEXT_PUBLIC_AGENT_API_URL=http://127.0.0.1:8001
+   NEXT_PUBLIC_CFO_API_KEY=tp_cfo_dev_key_2026
    ```
+   The browser key is included in client-side code and is suitable only for local demos; it is
+   not a production secret. Use a server-side proxy and production authentication in deployment.
 
 4. **Launch the Next.js 14 Dashboard:**
    ```bash
@@ -411,7 +470,7 @@ The `.next` directory is generated and will be recreated when Next.js starts.
 
 ### Step 3: Run the Automated Test Suite
 
-Run the full pytest suite (17 tests verifying Demurrage arithmetic, POD extraction, channel pre-flight guardrails, drops conversion, channel funding, and end-to-end delivery pipeline):
+Run the full pytest suite (28 tests covering demurrage arithmetic, POD extraction and upload validation, deterministic policy/auth/idempotency controls, XRPL channel governance and reconciliation, channel funding, and delivery processing):
 
 ```bash
 cd ../backend
@@ -427,13 +486,15 @@ You can trigger settlements in two ways:
 #### Option A: Direct from the CFO Dashboard UI (Recommended for Judges)
 1. Open **[http://localhost:3000](http://localhost:3000)**.
 2. Locate the **Inbound Delivery Simulator** card above the Telemetry Feed.
-3. Select any African corridor preset:
-   -  **Standard Freight (Mombasa -> Kampala)** (3.5h dwell = $530.00 RLUSD)
-   -  **Border Bottleneck (Malaba Customs)** (6.0h dwell = $580.00 RLUSD)
-   -  **Severe Depot Congestion (Kampala)** (11.0h dwell = $680.00 RLUSD)
-   -  **Over-Cap Breach Attempt** (35.0h dwell = Blocked by Ledger Limit)
-4. Click **`Process Inbound Delivery`**.
-5. The agent immediately audits the claim, submits a `PaymentChannelClaim` to XRPL Testnet, and slides out the **AI Reasoning Dossier** with the live transaction hash!
+3. *(Optional)* Click **Upload Scanned POD** to attach your own Bill of Lading image, or click **View Scanned Bill of Lading** (the thumbnail preview beside the freight identifier) to open the full **OCR Inspector Modal** — which displays animated OCR bounding boxes, physical ink stamp positions, and a GPS cross-audit panel.
+4. Select any African corridor preset:
+   - **Standard Freight (Mombasa → Kampala)** (3.5 h dwell = \$530.00 RLUSD)
+   - **Border Bottleneck (Malaba Customs)** (6.0 h dwell = \$580.00 RLUSD)
+   - **Severe Depot Congestion (Kampala)** (11.0 h dwell = \$680.00 RLUSD)
+   - **Over-Cap Breach Attempt** (35.0 h dwell = Blocked by Ledger Limit)
+5. Click **`Process Inbound Delivery`**.
+6. The agent immediately audits the claim, submits a `PaymentChannelClaim` to XRPL Testnet, and slides out the **AI Reasoning Dossier** with the live transaction hash.
+7. The new entry appears instantly at the top of the **Live Agent Telemetry & Settlement History** table. Click **View Scan** on the row to inspect the POD dossier, or click the 64-character TX hash to open it on [testnet.xrpl.org](https://testnet.xrpl.org). Use the **search bar** or **All / Settled / Rejected** filter tabs to explore past events.
 
 #### Option B: Via Terminal / API
 
@@ -452,7 +513,7 @@ payload = {
     'geofence_lon': 32.5825,
     'carrier_wallet': 'rLytz9wbRUkJnBDL21SmSSvDkMY6J4rXRp'
 }
-req = urllib.request.Request('http://localhost:8001/api/v1/process-delivery', data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+req = urllib.request.Request('http://localhost:8001/api/v1/process-delivery', data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'X-API-Key': 'tp_cfo_dev_key_2026'})
 with urllib.request.urlopen(req) as resp:
     print(resp.read().decode())
 "
@@ -462,6 +523,7 @@ with urllib.request.urlopen(req) as resp:
 ```bash
 curl -X POST http://localhost:8001/api/v1/process-delivery \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: tp_cfo_dev_key_2026" \
   -d '{
     "freight_id": "FRT-2024-KLA-0042",
     "truck_plate": "KAA-123K",
@@ -475,7 +537,8 @@ curl -X POST http://localhost:8001/api/v1/process-delivery \
   }'
 ```
 
-**Expected JSON Response:**
+**Illustrative JSON response:** Values, including the transaction identifier and
+channel balances, are sample data and do not represent a live or current payment.
 ```json
 {
   "log_id": "e89dbea1-ac58-4713-8c66-24603b031b19",
@@ -524,15 +587,33 @@ TransitPay/
 │   ├── .env.local
 │   └── package.json
 │
-└── README.md                   # This file (Section 4: Pitch Narrative)
+├── LICENSE                     # MIT License
+└── README.md                   # Project guide, feature summary, and references
 ```
 
 ---
 
 ## 8. XRPL Technical References
 
+### Sources and attribution
+
+- **Corridor geography and population:** The more-than-250-million regional
+  population figure is attributed to the [Northern Corridor Transit and Transport
+  Coordination Authority (NCTTCA)](https://www.ttcanc.org/), which describes the
+  corridor's member states and regional population (official website, accessed
+  2026-11-13). No annual corridor trade-value estimate is claimed here.
+- **RLUSD backing and redemption description:** [Ripple's RLUSD documentation](https://docs.ripple.com/products/stablecoin)
+  is the issuer source for the stated 1:1 USD backing/redemption design.
+- **Payment-channel behavior:** XRPL protocol descriptions are linked below.
+
+The README does not claim externally measured regional demurrage-loss, dispute,
+default, banking-fee, or payment-delay averages. Roadmap KPIs and pricing are
+TransitPay planning assumptions; dashboard OCR confidence values and example
+settlement amounts are synthetic demo data.
+
 | Resource | URL |
 |---|---|
+| NCTTCA official website | https://www.ttcanc.org/ |
 | XRPL Payment Channels | https://xrpl.org/docs/concepts/payment-types/payment-channels |
 | XRPL Agent Docs | https://xrpl.org/docs/agents |
 | XRPL Agent Wallet Skill | https://xrpl.org/docs/agents/xrpl-agent-wallet-skill |

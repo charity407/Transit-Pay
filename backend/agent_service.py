@@ -24,7 +24,8 @@ import uuid
 import base64
 import logging
 import asyncio
-import time
+import threading
+import binascii
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional, List
@@ -48,10 +49,13 @@ from xrpl_treasury import (
     fund_payment_channel,
     get_channel_info,
     get_account_balance,
+    reconcile_channel_with_ledger,
     RLUSD_TESTNET_ISSUER,
     XRPL_TESTNET_RPC,
 )
 from xrpl.wallet import Wallet
+from fastapi import Depends
+from fastapi.security import APIKeyHeader
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -67,6 +71,12 @@ CFO_WALLET_SEED      = os.getenv("CFO_WALLET_SEED", "")
 CHANNEL_STATE_FILE   = Path(__file__).parent / "channel_state.json"
 AUDIT_LOG_FILE       = Path(__file__).parent / "audit_logs.jsonl"
 
+# ---------------------------------------------------------------------------
+# API KEY AUTH — safe dev fallbacks so local runs never break if unset
+# ---------------------------------------------------------------------------
+CFO_API_KEY   = os.getenv("CFO_API_KEY",   "tp_cfo_dev_key_2026")
+AGENT_API_KEY = os.getenv("AGENT_API_KEY", "tp_agent_dev_key_2026")
+
 # Demurrage policy (overridable by CFO via /update-limits)
 AGENT_LIMITS = {
     "base_freight_usd":        Decimal("500.00"),
@@ -80,6 +90,67 @@ AGENT_LIMITS = {
 
 daily_spend_tracker: dict[str, Decimal] = {}       # date_str → total_spent
 audit_logs: list[dict] = []
+settled_freight_ids: set[str] = set()              # idempotency guard — freight IDs with APPROVED decisions
+processing_freight_ids: set[str] = set()
+_freight_ids_lock = threading.Lock()
+_claim_execution_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# API KEY AUTH DEPENDENCIES
+# ---------------------------------------------------------------------------
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def require_cfo_auth(api_key: Optional[str] = Depends(_api_key_header)):
+    """Protects CFO-only treasury control plane endpoints."""
+    if api_key != CFO_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: valid CFO X-API-Key required.")
+
+def require_operator_auth(api_key: Optional[str] = Depends(_api_key_header)):
+    """Protects the process-delivery endpoint (accepts CFO or Agent key)."""
+    if api_key not in (CFO_API_KEY, AGENT_API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized: valid X-API-Key required.")
+
+
+# ---------------------------------------------------------------------------
+# DETERMINISTIC POLICY ENFORCEMENT LAYER
+# ---------------------------------------------------------------------------
+def enforce_policy(pod: dict, calc: dict, channel: dict, limits: dict) -> tuple[bool, str]:
+    """
+    Hard deterministic guardrails that run AFTER Vision/OCR parsing and
+    BEFORE any XRPL claim_payment() call.  Even if the LLM returns 'APPROVED',
+    this function can override the decision to 'REJECTED'.
+
+    Returns (passed: bool, reason: str).
+    """
+    try:
+        total = Decimal(str(calc["total_payout_rlusd"]))
+        confidence = Decimal(str(pod.get("confidence_score", 0)))
+        max_trip = Decimal(str(limits["max_single_trip_rlusd"]))
+        max_daily = Decimal(str(
+            limits.get("max_daily_budget_rlusd", limits.get("max_daily_rlusd"))
+        ))
+        remaining = Decimal(str(channel["remaining_rlusd"]))
+        daily_spent = Decimal(str(daily_spend_tracker.get(_today_key(), Decimal("0"))))
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False, "Policy violation: required policy input is missing or invalid."
+
+    if pod.get("delivery_status") != "COMPLETED":
+        return False, f"Policy violation: delivery_status is '{pod.get('delivery_status')}', must be COMPLETED."
+    if not confidence.is_finite() or confidence < Decimal("0.80"):
+        return False, f"Policy violation: POD confidence score {confidence} below 0.80 threshold."
+    if not total.is_finite() or total <= Decimal("0"):
+        return False, "Policy violation: total payout must be positive."
+    if not max_trip.is_finite() or total > max_trip:
+        return False, f"Policy violation: payout exceeds single-trip cap of {max_trip} RLUSD."
+    if not max_daily.is_finite() or not daily_spent.is_finite() or daily_spent < 0 or daily_spent + total > max_daily:
+        return False, (
+            f"Policy violation: daily budget exhausted. Spent today: {daily_spent} RLUSD, "
+            f"limit: {max_daily} RLUSD, requested: {total} RLUSD."
+        )
+    if not remaining.is_finite() or total > remaining:
+        return False, f"Policy violation: payout exceeds active channel float of {remaining} RLUSD."
+
+    return True, "All deterministic policy checks passed."
 
 # ---------------------------------------------------------------------------
 # PYDANTIC SCHEMAS
@@ -146,7 +217,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # tighten for production
+    allow_origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -184,17 +255,42 @@ def _save_channel_record(record: ChannelRecord):
     """Persist updated channel record back to JSON state file."""
     with open(CHANNEL_STATE_FILE, "r") as fh:
         state = json.load(fh)
+    for key, value in state.items():
+        if key.endswith("_wallet") and isinstance(value, dict):
+            value.pop("seed", None)
     state["channel"] = record.to_dict()
     with open(CHANNEL_STATE_FILE, "w") as fh:
         json.dump(state, fh, indent=2, default=str)
 
 
 def _load_wallets() -> tuple[Wallet, Wallet]:
-    agent_seed   = AGENT_WALLET_SEED or CFO_WALLET_SEED   # agent uses CFO seed if no dedicated seed
-    carrier_seed = CARRIER_WALLET_SEED
-    if not agent_seed or not carrier_seed:
+    agent_seed = AGENT_WALLET_SEED or CFO_WALLET_SEED
+    if not agent_seed or not CARRIER_WALLET_SEED:
         raise HTTPException(status_code=503, detail="Wallet seeds not configured in .env")
-    return Wallet.from_seed(agent_seed), Wallet.from_seed(carrier_seed)
+
+    agent_wallet = Wallet.from_seed(agent_seed)
+    carrier_wallet = Wallet.from_seed(CARRIER_WALLET_SEED)
+    cfo_wallet = Wallet.from_seed(CFO_WALLET_SEED) if CFO_WALLET_SEED else None
+
+    if CHANNEL_STATE_FILE.exists():
+        with open(CHANNEL_STATE_FILE) as fh:
+            state = json.load(fh)
+        registered_key = (
+            state.get("channel_public_key")
+            or state.get("agent_wallet", {}).get("public_key")
+            or state.get("cfo_wallet", {}).get("public_key")
+            or (cfo_wallet.public_key if cfo_wallet else None)
+        )
+        if registered_key and agent_wallet.public_key != registered_key:
+            if cfo_wallet and cfo_wallet.public_key == registered_key:
+                agent_wallet = cfo_wallet
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Configured claim wallet does not match the public key registered on the active channel.",
+                )
+
+    return agent_wallet, carrier_wallet
 
 
 def _today_key() -> str:
@@ -212,15 +308,90 @@ def _daily_budget_check(amount: Decimal):
         )
 
 
-def _record_daily_spend(amount: Decimal):
-    today = _today_key()
-    daily_spend_tracker[today] = daily_spend_tracker.get(today, Decimal("0")) + amount
-
-
 def _append_audit_log(log: dict):
     audit_logs.append(log)
+    if log.get("decision") == "APPROVED" and log.get("freight_id"):
+        with _freight_ids_lock:
+            settled_freight_ids.add(log["freight_id"])
     with open(AUDIT_LOG_FILE, "a") as fh:
         fh.write(json.dumps(log, default=str) + "\n")
+
+
+MAX_POD_IMAGE_BYTES = 5 * 1024 * 1024
+ALLOWED_POD_IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def _validate_pod_image(encoded_image: str, mime_type: Optional[str]) -> tuple[str, str]:
+    if mime_type is not None and not isinstance(mime_type, str):
+        raise HTTPException(status_code=415, detail="Invalid POD image MIME type.")
+    if encoded_image.startswith("data:"):
+        header, separator, encoded_image = encoded_image.partition(",")
+        if not separator:
+            raise HTTPException(status_code=422, detail="Invalid base64 POD image data URL.")
+        declared_mime = header[5:].split(";", 1)[0].lower()
+        if mime_type and mime_type.lower() != declared_mime:
+            raise HTTPException(status_code=415, detail="POD image MIME type does not match its data URL header.")
+        mime_type = declared_mime
+
+    mime_type = (mime_type or "").lower()
+    if mime_type not in ALLOWED_POD_IMAGE_MIMES:
+        raise HTTPException(status_code=415, detail="POD image MIME type must be image/png, image/jpeg, or image/webp.")
+    if len(encoded_image) > ((MAX_POD_IMAGE_BYTES + 2) // 3) * 4:
+        raise HTTPException(status_code=413, detail="POD image exceeds the 5 MB limit.")
+
+    try:
+        decoded = base64.b64decode(encoded_image, validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="POD image must contain valid base64 data.")
+    if len(decoded) > MAX_POD_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="POD image exceeds the 5 MB limit.")
+    if not decoded:
+        raise HTTPException(status_code=422, detail="POD image cannot be empty.")
+    return encoded_image, mime_type
+
+
+async def _claim_payment_once(
+    freight_id: str,
+    channel_record: ChannelRecord,
+    total_payout: Decimal,
+    agent_wallet: Wallet,
+    carrier_wallet: Wallet,
+) -> dict:
+    async with _claim_execution_lock:
+        with _freight_ids_lock:
+            if freight_id in settled_freight_ids or freight_id in processing_freight_ids:
+                raise HTTPException(status_code=409, detail="Duplicate freight_id: already settled on-chain")
+            processing_freight_ids.add(freight_id)
+
+            date_key = _today_key()
+            spent = daily_spend_tracker.get(date_key, Decimal("0"))
+            daily_limit = AGENT_LIMITS["max_daily_rlusd"]
+            if spent + total_payout > daily_limit:
+                processing_freight_ids.discard(freight_id)
+                raise ClaimRejectedError(
+                    f"Daily budget exceeded. Spent today: {spent} RLUSD, "
+                    f"limit: {daily_limit} RLUSD, requested: {total_payout} RLUSD."
+                )
+            daily_spend_tracker[date_key] = spent + total_payout
+
+        succeeded = False
+        try:
+            result = await asyncio.to_thread(
+                claim_payment,
+                channel_record=channel_record,
+                rlusd_amount=total_payout,
+                agent_wallet=agent_wallet,
+                carrier_wallet=carrier_wallet,
+            )
+            succeeded = True
+            return result
+        finally:
+            with _freight_ids_lock:
+                processing_freight_ids.discard(freight_id)
+                if succeeded:
+                    settled_freight_ids.add(freight_id)
+                else:
+                    daily_spend_tracker[date_key] -= total_payout
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +419,7 @@ async def parse_pod_with_vision(
     freight_id: Optional[str] = None,
     dwell_minutes: int = 210,
     route_name: Optional[str] = None,
+    pod_image_mime: str = "image/jpeg",
 ) -> dict:
     """
     Use OpenAI GPT-4o Vision to extract structured fields and OCR bounding boxes from a POD document.
@@ -286,7 +458,7 @@ async def parse_pod_with_vision(
             "role": "user",
             "content": [
                 {"type": "text", "text": "Parse this scanned POD document image and extract all stamped arrival/departure times, freight numbers, and signatures with OCR coordinates:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{pod_image_b64}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{pod_image_mime};base64,{pod_image_b64}"}},
             ],
         })
     else:
@@ -308,8 +480,22 @@ async def parse_pod_with_vision(
             parsed["ocr_bounding_boxes"] = mock_boxes["ocr_bounding_boxes"]
         return parsed
     except Exception as exc:
-        logger.error("Vision API error: %s — falling back to mock", exc)
-        return _mock_pod_parse(carrier_wallet, freight_id=freight_id, pod_text=pod_text, dwell_minutes=dwell_minutes, route_name=route_name)
+        logger.error("Vision API error: %s", exc)
+        return {
+            "freight_id": freight_id,
+            "arrival_time": None,
+            "departure_time": None,
+            "carrier_name": None,
+            "carrier_wallet": carrier_wallet,
+            "origin": None,
+            "destination": None,
+            "goods_description": None,
+            "delivery_status": "UNVERIFIED",
+            "receiver_signature": None,
+            "confidence_score": 0.0,
+            "ocr_bounding_boxes": [],
+            "parse_error": "Vision OCR unavailable; manual review required.",
+        }
 
 
 def _mock_pod_parse(
@@ -553,13 +739,14 @@ def _mock_authorisation(calc: dict, channel: ChannelRecord) -> dict:
 # ---------------------------------------------------------------------------
 # MAIN ENDPOINT — Process Delivery
 # ---------------------------------------------------------------------------
-@app.post("/api/v1/process-delivery", response_model=AuditLog)
+@app.post("/api/v1/process-delivery", response_model=AuditLog, dependencies=[Depends(require_operator_auth)])
 async def process_delivery(
     request:          Request,
     background_tasks: BackgroundTasks,
     gps_data:         Optional[str]        = Form(None, description="JSON string of GPSTelemetry"),
     pod_image:        Optional[UploadFile] = File(None, description="POD receipt image"),
     pod_text:         Optional[str]        = Form(None, description="Pre-parsed POD text"),
+    pod_image_mime:   Optional[str]        = Form(None, description="POD image MIME type"),
 ):
     """
     Main agentic pipeline:
@@ -575,6 +762,7 @@ async def process_delivery(
 
     # --- Parse GPS & input parameters (support both JSON body and Form data) ---
     pod_image_b64 = None
+    image_mime = pod_image_mime
     parsed_gps = None
     incoming_pod_text = pod_text
 
@@ -582,6 +770,8 @@ async def process_delivery(
     if "application/json" in content_type:
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=422, detail="JSON request body must be an object.")
             if "gps_data" in body and isinstance(body["gps_data"], dict):
                 parsed_gps = GPSTelemetry(**body["gps_data"])
             elif "freight_id" in body and "truck_plate" in body:
@@ -590,6 +780,9 @@ async def process_delivery(
                 parsed_gps = GPSTelemetry(**body["gps_telemetry"])
             incoming_pod_text = body.get("pod_text")
             pod_image_b64 = body.get("pod_image_b64")
+            image_mime = body.get("pod_image_mime")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Invalid JSON payload: {exc}")
     else:
@@ -599,22 +792,23 @@ async def process_delivery(
             except Exception as exc:
                 raise HTTPException(status_code=422, detail=f"Invalid GPS telemetry JSON: {exc}")
         if pod_image:
-            raw_bytes = await pod_image.read()
+            raw_bytes = await pod_image.read(MAX_POD_IMAGE_BYTES + 1)
+            if len(raw_bytes) > MAX_POD_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="POD image exceeds the 5 MB limit.")
             pod_image_b64 = base64.b64encode(raw_bytes).decode()
+            image_mime = pod_image.content_type
 
     if not parsed_gps:
-        # Default fallback scenario if minimal body sent
-        parsed_gps = GPSTelemetry(
-            freight_id="FRT-2024-KLA-0042",
-            truck_plate="KAA-123K",
-            geofence_name="Kampala Central Warehouse",
-            entry_timestamp=datetime.now(timezone.utc).isoformat(),
-            exit_timestamp=datetime.now(timezone.utc).isoformat(),
-            total_dwell_minutes=330,
-            geofence_lat=0.3476,
-            geofence_lon=32.5825,
-            carrier_wallet="rLytz9wbRUkJnBDL21SmSSvDkMY6J4rXRp",
-        )
+        raise HTTPException(status_code=422, detail="A valid GPS telemetry payload is required.")
+
+    if pod_image_b64 is not None:
+        if not isinstance(pod_image_b64, str):
+            raise HTTPException(status_code=422, detail="POD image data must be a base64 string.")
+        pod_image_b64, image_mime = _validate_pod_image(pod_image_b64, image_mime)
+
+    with _freight_ids_lock:
+        if parsed_gps.freight_id in settled_freight_ids:
+            raise HTTPException(status_code=409, detail="Duplicate freight_id: already settled on-chain")
 
     gps = parsed_gps
 
@@ -630,6 +824,7 @@ async def process_delivery(
         freight_id=gps.freight_id,
         dwell_minutes=gps.total_dwell_minutes,
         route_name=gps.geofence_name,
+        pod_image_mime=image_mime or "image/jpeg",
     )
 
     # --- Demurrage Calculation ---
@@ -639,6 +834,19 @@ async def process_delivery(
 
     # --- Authorisation ---
     auth = await llm_authorise_payout(pod_fields, calc, channel_record)
+    policy_passed, policy_reason = enforce_policy(
+        pod_fields,
+        calc,
+        channel_record.to_dict(),
+        AGENT_LIMITS,
+    )
+    if not policy_passed:
+        auth = {
+            **auth,
+            "approved": False,
+            "rejection_code": "POLICY_DETERMINISTIC",
+            "reasoning": policy_reason,
+        }
 
     decision         = "SHADOW_MODE"
     rejection_code   = auth.get("rejection_code")
@@ -657,17 +865,16 @@ async def process_delivery(
         # --- Execute XRPL Claim ---
         try:
             _daily_budget_check(total_payout)
-            claim_result = await asyncio.to_thread(
-                claim_payment,
+            claim_result = await _claim_payment_once(
+                freight_id=gps.freight_id,
                 channel_record=channel_record,
-                rlusd_amount=total_payout,
+                total_payout=total_payout,
                 agent_wallet=agent_wallet,
                 carrier_wallet=carrier_wallet,
             )
             tx_hash      = claim_result["tx_hash"]
             explorer_url = claim_result["explorer_url"]
             decision     = "APPROVED"
-            _record_daily_spend(total_payout)
             _save_channel_record(channel_record)
         except ClaimRejectedError as exc:
             decision         = "REJECTED"
@@ -713,10 +920,6 @@ async def process_delivery(
         "reasoning":           auth["reasoning"],
         "pod_parsed_fields":   pod_fields,
     }
-
-    background_tasks.add_task(_append_audit_log, log_entry)
-    logger.info("Audit log written: %s | Decision: %s", log_id, decision)
-    return JSONResponse(content=log_entry)
 
     background_tasks.add_task(_append_audit_log, log_entry)
     logger.info("Audit log written: %s | Decision: %s", log_id, decision)
@@ -774,7 +977,7 @@ def channel_status():
 # ENDPOINT — Top up the active payment channel
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/channel-fund")
-async def channel_fund(request: ChannelFundingRequest):
+async def channel_fund(request: ChannelFundingRequest, _auth: None = Depends(require_cfo_auth)):
     """CFO adds XRP-backed capacity to the active payment channel."""
     record = _load_channel_record()
     if not record.is_open:
@@ -835,7 +1038,7 @@ async def channel_fund(request: ChannelFundingRequest):
 # ENDPOINT — Update Agent Limits (CFO)
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/update-limits")
-async def update_limits(update: AgentLimitsUpdate):
+async def update_limits(update: AgentLimitsUpdate, _auth: None = Depends(require_cfo_auth)):
     """CFO adjusts agent operating limits in real-time (no XRPL tx required)."""
     changed = {}
     if update.base_freight_usd is not None:
@@ -868,13 +1071,15 @@ async def update_limits(update: AgentLimitsUpdate):
 # ENDPOINT — Kill Switch
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/kill-switch")
-def kill_switch():
+def kill_switch(_auth: None = Depends(require_cfo_auth)):
     """CFO-activated emergency closure of the active payment channel."""
     record = _load_channel_record()
     if not record.is_open:
         return {"status": "ALREADY_CLOSED", "channel_id": record.channel_id}
 
-    cfo_wallet, _ = _load_wallets()
+    if not CFO_WALLET_SEED:
+        raise HTTPException(status_code=500, detail="CFO_WALLET_SEED is not configured — cannot sign kill-switch transaction.")
+    cfo_wallet = Wallet.from_seed(CFO_WALLET_SEED)
     result = emergency_close_channel(cfo_wallet=cfo_wallet, channel_record=record)
     _save_channel_record(record)
 
@@ -900,13 +1105,44 @@ async def health():
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def load_audit_logs():
+    audit_logs.clear()
+    settled_freight_ids.clear()
+    daily_spend_tracker.clear()
     if AUDIT_LOG_FILE.exists():
         with open(AUDIT_LOG_FILE) as fh:
             for line in fh:
                 line = line.strip()
                 if line:
-                    audit_logs.append(json.loads(line))
+                    entry = json.loads(line)
+                    audit_logs.append(entry)
+                    if entry.get("decision") == "APPROVED" and entry.get("freight_id"):
+                        settled_freight_ids.add(entry["freight_id"])
+                        try:
+                            settled_at = datetime.fromisoformat(
+                                entry["timestamp"].replace("Z", "+00:00")
+                            ).astimezone(timezone.utc)
+                            date_key = settled_at.strftime("%Y-%m-%d")
+                            amount = Decimal(str(entry["total_payout_rlusd"]))
+                            if not amount.is_finite() or amount < 0:
+                                raise ValueError("settlement amount is not finite and non-negative")
+                            daily_spend_tracker[date_key] = (
+                                daily_spend_tracker.get(date_key, Decimal("0")) + amount
+                            )
+                        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                            logger.warning(
+                                "Skipping invalid settlement amount/date in audit log %s: %s",
+                                entry.get("log_id", "unknown"),
+                                exc,
+                            )
         logger.info("Loaded %d audit logs from disk.", len(audit_logs))
+    if CHANNEL_STATE_FILE.exists():
+        try:
+            record = _load_channel_record()
+            _save_channel_record(record)
+            reconcile_channel_with_ledger(record)
+            _save_channel_record(record)
+        except Exception as exc:
+            logger.warning("Could not reconcile channel state with XRPL at startup: %s", exc)
 
 
 if __name__ == "__main__":

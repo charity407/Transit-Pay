@@ -148,6 +148,7 @@ interface PresetScenario {
 // CONFIG & CONSTANTS
 // ---------------------------------------------------------------------------
 const API_BASE = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8001";
+const API_KEY = process.env.NEXT_PUBLIC_CFO_API_KEY || "tp_cfo_dev_key_2026";
 const POLL_INTERVAL_MS = 6000;
 const KES_PER_RLUSD = 129.0; // East African corridor benchmark
 
@@ -850,7 +851,7 @@ export default function Dashboard() {
     try {
       const res = await fetch(`${API_BASE}/api/v1/channel-fund`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
         body: JSON.stringify({ amount_rlusd: amount }),
       });
       const data = await res.json();
@@ -897,16 +898,20 @@ export default function Dashboard() {
         demurrage_rate_cap:      limits.demurrage_rate_cap,
         autonomous_mode:         limits.autonomous_mode,
       };
-      await fetch(`${API_BASE}/api/v1/update-limits`, {
+      const res = await fetch(`${API_BASE}/api/v1/update-limits`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
         body:    JSON.stringify(payload),
       });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail ?? `Saving agent limits failed (HTTP ${res.status}).`);
+      }
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch {
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unexpected error while saving agent limits.";
+      setSimulationToast({ type: "error", msg: message });
     } finally {
       setLimitsSaving(false);
     }
@@ -916,8 +921,14 @@ export default function Dashboard() {
     if (!confirm("⚠️ EMERGENCY GOVERNANCE ACTION\n\nThis will broadcast an on-chain PaymentChannelClaim (tfClose) to XRPL Testnet, immediately revoking the agent's signing authority. Unclaimed funds return to the CFO.\n\nProceed?")) return;
     setKillPending(true);
     try {
-      const res = await fetch(`${API_BASE}/api/v1/kill-switch`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/api/v1/kill-switch`, {
+        method: "POST",
+        headers: { "X-API-Key": API_KEY },
+      });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail ?? `Kill-switch request failed (HTTP ${res.status}).`);
+      }
       setIsKillSwitchOn(true);
       setChannelStatus(prev => ({
         ...prev,
@@ -927,12 +938,11 @@ export default function Dashboard() {
         type: "error",
         msg: `🚨 Emergency Kill-Switch Activated! Channel ${truncate(prevChannelId, 8, 6)} closed on XRPL.`,
       });
-    } catch {
-      setIsKillSwitchOn(true);
-      setChannelStatus(prev => ({ ...prev, channel: { ...prev.channel, is_open: false } }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unexpected error while activating the kill-switch.";
       setSimulationToast({
         type: "error",
-        msg: "🚨 Emergency Kill-Switch Activated locally. Channel frozen.",
+        msg: `Kill-switch could not be confirmed: ${message}`,
       });
     } finally {
       setKillPending(false);
@@ -969,12 +979,15 @@ export default function Dashboard() {
         ? uploadedDocImage.split("base64,")[1]
         : uploadedDocImage;
       payload.pod_image_b64 = b64;
+      payload.pod_image_mime = uploadedDocImage.startsWith("data:")
+        ? uploadedDocImage.slice(5, uploadedDocImage.indexOf(";"))
+        : "image/jpeg";
     }
 
     try {
       const res = await fetch(`${API_BASE}/api/v1/process-delivery`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
         body:    JSON.stringify(payload),
       });
 
@@ -1146,7 +1159,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">
-                Autonomous Northern Corridor Freight & Demurrage Treasury
+                Northern Corridor freight & demurrage · XRP-backed RLUSD proxy on Testnet; native RLUSD XLS-65 vaults planned for Mainnet
               </p>
             </div>
           </div>
