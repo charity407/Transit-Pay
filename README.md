@@ -613,7 +613,6 @@ settlement amounts are synthetic demo data.
 
 | Resource | URL |
 |---|---|
-| NCTTCA official website | https://www.ttcanc.org/ |
 | XRPL Payment Channels | https://xrpl.org/docs/concepts/payment-types/payment-channels |
 | XRPL Agent Docs | https://xrpl.org/docs/agents |
 | XRPL Agent Wallet Skill | https://xrpl.org/docs/agents/xrpl-agent-wallet-skill |
@@ -623,6 +622,22 @@ settlement amounts are synthetic demo data.
 | xrpl-py SDK | https://xrpl-py.readthedocs.io |
 | XLS-65 Single Asset Vaults | https://xrpl.org/docs/concepts/tokens/single-asset-vaults |
 | Privy Agent Wallets | https://docs.privy.io |
+
+### Backing News & Institutional References
+1. Northern Corridor Transit and Transport Coordination Authority (NCTTCA): Official Corridor
+Geography & Regional Population Overview (6 member states, 250M+ regional population) —
+https://www.ttcanc.org/
+2. The Standard (Kenya): "Trucks pile up at Malaba border amid clearance hitches" —
+https://www.standardmedia.co.ke/evewoman/trendsetters/article/2001455673/trucks-pile-up-at
+malaba-border-amid-clearance-hitches
+3. Citizen Digital: "How East African traders are losing billions to a broken cross-border payment
+system" — https://citizen.digital/article/how-east-african-traders-are-losing-billions-to-a-broken
+cross-border-payment-system-n383223
+4. Nigerian Tribune: "The future of cross-border logistics payments in Africa: Can stablecoins
+improve settlement by 2027?" — https://tribuneonlineng.com/the-future-of-cross-border-logistics
+payments-in-africa-can-stablecoins-improve-settlement-by-2027/
+5. HoneyCoin Insights: "East Africa Payments Guide" — https://honeycoin.app/blog/east-africa
+payments-guide
 
 ---
 ## 9. Team & Acknowledgements
