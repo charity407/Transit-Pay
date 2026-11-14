@@ -625,7 +625,6 @@ settlement amounts are synthetic demo data.
 | Privy Agent Wallets | https://docs.privy.io |
 
 ---
-
 ## 9. Team & Acknowledgements
 
 Built for the **Ripple Agentic Finance Hackathon**
@@ -633,6 +632,12 @@ Built for the **Ripple Agentic Finance Hackathon**
 > *"Africa's trade infrastructure is too important to run on 1980s payment rails.  
 > XRPL + RLUSD + AI agents make instant, transparent, auditable freight settlement possible — today."*
 
+### Video Demo
+https://youtu.be/RXbBnc2AAUs
+### Investor Pitch Deck
+https://canva.link/p6g7jopiehitof3
+### Quick Investor Memorandum
+https://drive.google.com/file/d/1XIWOK-1xYmU_TIMbyHwq1ZqaIvpvFzgL/view?usp=sharing
 ---
 
 <div align="center">
