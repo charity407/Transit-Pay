@@ -638,6 +638,7 @@ https://youtu.be/RXbBnc2AAUs
 https://canva.link/p6g7jopiehitof3
 ### Quick Investor Memorandum
 https://drive.google.com/file/d/1XIWOK-1xYmU_TIMbyHwq1ZqaIvpvFzgL/view?usp=sharing
+
 ---
 
 <div align="center">
